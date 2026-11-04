@@ -451,7 +451,7 @@ func writeUnbridgedCluster(b *strings.Builder, ids *idSequence, vpairs []types.N
 	seen := make(map[string]struct{})
 	pairs := make([]types.Node, 0, len(vpairs))
 	for _, vp := range vpairs {
-		key := hashVethpair(vp.Veth, vp.Peer)
+		key := vethPairKey(vp.Veth, vp.Peer)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -480,6 +480,9 @@ func writeUnbridgedCluster(b *strings.Builder, ids *idSequence, vpairs []types.N
 
 	for _, pair := range pairs {
 		leftLines := addressLines(pair.Addrs)
+		if pair.MasterName != "" {
+			leftLines = append(leftLines, nodeLine{text: "master " + pair.MasterName, color: unbridgedColor})
+		}
 		if route := routeText(pair); route != "" {
 			leftLines = append(leftLines, nodeLine{text: route, color: mutedInkColor})
 		}

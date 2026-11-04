@@ -193,7 +193,7 @@ func writeVethPairs(b *strings.Builder, vpairs []types.Node, netNsMap map[int]st
 	seen := make(map[string]struct{})
 	pairs := make([]types.Node, 0, len(vpairs))
 	for _, v := range vpairs {
-		h := hashVethpair(v.Veth, v.Peer)
+		h := vethPairKey(v.Veth, v.Peer)
 		if _, ok := seen[h]; ok {
 			continue
 		}
@@ -213,6 +213,9 @@ func writeVethPairs(b *strings.Builder, vpairs []types.Node, netNsMap map[int]st
 			peerName = "(unknown)"
 		}
 		fields := []string{"🔗", vethStyle.Render(p.Veth), peerStyle.Render("⇄ " + peerName)}
+		if p.MasterName != "" {
+			fields = append(fields, peerStyle.Render("master "+p.MasterName))
+		}
 		if ip := addressText(p.Addrs); ip != "" {
 			fields = append(fields, ipStyle.Render(ip))
 		}

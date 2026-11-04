@@ -126,117 +126,64 @@ func main() {
 	}
 
 	for _, link := range ll {
-		veth, ok := link.(*netlink.Veth)
-		if !ok {
+		if link.Type() != "veth" {
 			logrus.Debugf("skip %s, type: %s", link.Attrs().Name, link.Type())
 			continue
 		}
-		logrus.Debugf("veth device: %+v", veth)
-
-		peerIdx, err := netlink.VethPeerIndex(veth)
-		if err != nil {
-			logrus.Fatal(err)
-		}
-		vethAddrs := linkAddrs(link)
-		if link.Attrs().MasterIndex == -1 || veth.MasterIndex == 0 {
-			logrus.Debugf("%s not has a bridge as master, MasterIndex: %d", veth.Name, link.Attrs().MasterIndex)
-			node := types.Node{
-				Type:    types.VethType,
-				Veth:    veth.Name,
-				Peer:    veth.PeerName,
-				PeerId:  peerIdx,
-				NetNsID: veth.NetNsID,
-				Addrs:   vethAddrs,
-			}
-			if peerNetNs, ok := netNsMap[veth.NetNsID]; ok {
-				peerInNs, peerAddrs, err := netutil.GetPeerInNs(peerNetNs, origin, peerIdx)
-				if err != nil {
-					logrus.Debugf("unable to inspect peer of %s in %s: %v", veth.Name, peerNetNs, err)
-				} else if peerInNs != nil {
-					node.NetNsName = peerNetNs
-					node.PeerNameInNetns = peerInNs.Attrs().Name
-					node.PeerAddrs = addrNets(peerAddrs)
-					node.Status = peerInNs.Attrs().OperState.String()
-					if node.Peer == "" {
-						node.Peer = node.PeerNameInNetns
-					}
-				}
-			}
-			if node.Peer == "" {
-				p, err := netlink.LinkByIndex(peerIdx)
-				if err != nil {
-					logrus.Debugf("unable to resolve peer of %s: %v", veth.Name, err)
-				} else {
-					node.Peer = p.Attrs().Name
-				}
-			}
-			routes, err := netlink.RouteList(link, netlink.FAMILY_V4)
-			if err != nil {
-				logrus.Fatal(err)
-			}
-			for _, route := range routes {
-				if route.Dst != nil && !route.Dst.IP.IsUnspecified() {
-					node.Route = route.Dst.IP
-					break
-				}
-			}
-			unBridgedVpairs = append(unBridgedVpairs, node)
-			continue
-		}
-
-		master, err := netlink.LinkByIndex(veth.Attrs().MasterIndex)
-		if err != nil {
-			logrus.Fatal(err)
-		}
-
-		if _, ok := master.(*netlink.Bridge); !ok {
-			continue
-		}
-		bridge := master.Attrs().Name
-		v, ok := bridgeVethM[bridge]
-		if !ok {
-			bridgeVethM[bridge] = []types.Node{}
-		}
-		masterAddrs, ok := bridgeAddrs[bridge]
-		if !ok {
-			masterAddrs = linkAddrs(master)
-			bridgeAddrs[bridge] = masterAddrs
-		}
-		pair := types.Node{
+		attrs := link.Attrs()
+		node := types.Node{
 			Type:    types.VethType,
-			Veth:    veth.Name,
-			PeerId:  peerIdx,
-			NetNsID: veth.NetNsID,
-			Addrs:   vethAddrs,
-			Master:  &types.Bridge{Name: bridge, Addrs: masterAddrs},
+			Veth:    attrs.Name,
+			PeerId:  attrs.ParentIndex,
+			NetNsID: attrs.NetNsID,
+			Addrs:   linkAddrs(link),
 		}
-		if peerNetNs, ok := netNsMap[veth.NetNsID]; ok {
-			peerInNs, peerAddrs, err := netutil.GetPeerInNs(peerNetNs, origin, peerIdx)
-			if err != nil {
-				logrus.Fatal(err)
-			}
-			pair.NetNsName = peerNetNs
-			pair.PeerNameInNetns = peerInNs.Attrs().Name
-			pair.PeerAddrs = addrNets(peerAddrs)
-			pair.Status = peerInNs.Attrs().OperState.String()
-
-			if _, ok := loSeen[peerNetNs]; !ok {
-				lo, loAddrs, err := netutil.GetLoInNs(peerNetNs, origin)
-				if err == nil && lo != nil {
-					loS = append(loS, types.Node{
-						Type:      types.LoType,
-						NetNsName: peerNetNs,
-						Status:    lo.Attrs().OperState.String(),
-						Addrs:     addrNets(loAddrs),
-					})
-					loSeen[peerNetNs] = struct{}{}
-				}
+		if veth, ok := link.(*netlink.Veth); ok {
+			node.Peer = veth.PeerName
+			if peerIdx, err := netlink.VethPeerIndex(veth); err != nil {
+				logrus.Debugf("unable to get peer index for %s: %v", attrs.Name, err)
+			} else if peerIdx > 0 {
+				node.PeerId = peerIdx
 			}
 		} else {
-			pair.Orphaned = true
+			logrus.Debugf("veth %s has type %T", attrs.Name, link)
+		}
+		logrus.Debugf("veth device: %+v", link)
+
+		if !fillPeer(&node, netNsMap, origin) {
+			resolvePeerName(&node)
 		}
 
-		bridgeVethM[bridge] = append(v, pair)
+		if attrs.MasterIndex > 0 {
+			master, err := netlink.LinkByIndex(attrs.MasterIndex)
+			if err != nil {
+				logrus.Debugf("unable to resolve master of %s: %v", attrs.Name, err)
+			} else if master.Type() != "bridge" {
+				node.MasterName = master.Attrs().Name
+				fillRoute(&node, link)
+				unBridgedVpairs = append(unBridgedVpairs, node)
+				continue
+			} else {
+				bridge := master.Attrs().Name
+				masterAddrs, ok := bridgeAddrs[bridge]
+				if !ok {
+					masterAddrs = linkAddrs(master)
+					bridgeAddrs[bridge] = masterAddrs
+				}
+				node.Master = &types.Bridge{Name: bridge, Addrs: masterAddrs}
+				if node.NetNsName == "" {
+					node.Orphaned = true
+				}
+				bridgeVethM[bridge] = append(bridgeVethM[bridge], node)
+				if node.NetNsName != "" {
+					addLoopback(&loS, loSeen, node.NetNsName, origin)
+				}
+				continue
+			}
+		}
+
+		fillRoute(&node, link)
+		unBridgedVpairs = append(unBridgedVpairs, node)
 	}
 	logrus.Debugf("bridgeVethMap: %+v", bridgeVethM)
 
@@ -283,6 +230,76 @@ func main() {
 	default:
 		formatter.Print(defaultOutput, bridgeVethM, netNsMap, unBridgedVpairs, loS, routers, *oNotBridgedVeths)
 	}
+}
+
+func fillPeer(node *types.Node, netNsMap map[int]string, origin netns.NsHandle) bool {
+	if node.PeerId <= 0 {
+		return false
+	}
+	peerNetNs, ok := netNsMap[node.NetNsID]
+	if !ok {
+		return false
+	}
+	peerInNs, peerAddrs, err := netutil.GetPeerInNs(peerNetNs, origin, node.PeerId)
+	if err != nil {
+		logrus.Debugf("unable to inspect peer of %s in %s: %v", node.Veth, peerNetNs, err)
+		return false
+	}
+	if peerInNs == nil {
+		return false
+	}
+	node.NetNsName = peerNetNs
+	node.PeerNameInNetns = peerInNs.Attrs().Name
+	node.PeerAddrs = addrNets(peerAddrs)
+	node.Status = peerInNs.Attrs().OperState.String()
+	if node.Peer == "" {
+		node.Peer = node.PeerNameInNetns
+	}
+	return true
+}
+
+func resolvePeerName(node *types.Node) {
+	if node.Peer != "" || node.PeerId <= 0 || node.NetNsID >= 0 {
+		return
+	}
+	peer, err := netlink.LinkByIndex(node.PeerId)
+	if err != nil {
+		logrus.Debugf("unable to resolve peer of %s: %v", node.Veth, err)
+		return
+	}
+	node.Peer = peer.Attrs().Name
+}
+
+func fillRoute(node *types.Node, link netlink.Link) {
+	routes, err := netlink.RouteList(link, netlink.FAMILY_V4)
+	if err != nil {
+		logrus.Debugf("unable to list routes for %s: %v", node.Veth, err)
+		return
+	}
+	for _, route := range routes {
+		if route.Dst != nil && !route.Dst.IP.IsUnspecified() {
+			node.Route = route.Dst.IP
+			return
+		}
+	}
+}
+
+func addLoopback(loS *[]types.Node, seen map[string]struct{}, ns string, origin netns.NsHandle) {
+	if _, ok := seen[ns]; ok {
+		return
+	}
+	lo, loAddrs, err := netutil.GetLoInNs(ns, origin)
+	if err != nil || lo == nil {
+		logrus.Debugf("unable to inspect loopback in %s: %v", ns, err)
+		return
+	}
+	*loS = append(*loS, types.Node{
+		Type:      types.LoType,
+		NetNsName: ns,
+		Status:    lo.Attrs().OperState.String(),
+		Addrs:     addrNets(loAddrs),
+	})
+	seen[ns] = struct{}{}
 }
 
 func defaultRouters() []types.Router {

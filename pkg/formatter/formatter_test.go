@@ -60,6 +60,56 @@ func TestGraphInDOTIncludesAddresses(t *testing.T) {
 	}
 }
 
+func TestTableIncludesOrphanedVeth(t *testing.T) {
+	vm := map[string][]types.Node{
+		"docker0": {{
+			Type:   types.VethType,
+			Veth:   "veth0",
+			Peer:   "veth1",
+			Master: &types.Bridge{Name: "docker0"},
+		}},
+	}
+
+	var out bytes.Buffer
+	if err := Table(&out, vm); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"veth0", "orphaned"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("Table() does not contain %q", want)
+		}
+	}
+}
+
+func TestVethPairKeyDoesNotCollide(t *testing.T) {
+	if vethPairKey("ab", "cd") == vethPairKey("ac", "bd") {
+		t.Fatal("vethPairKey() collides for distinct pairs")
+	}
+}
+
+func TestUnbridgedMasterIsRendered(t *testing.T) {
+	node := types.Node{
+		Type:       types.VethType,
+		Veth:       "veth0",
+		Peer:       "veth1",
+		MasterName: "ovs0",
+	}
+
+	var out bytes.Buffer
+	Print(&out, nil, nil, []types.Node{node}, nil, nil, true)
+	if !strings.Contains(out.String(), "master ovs0") {
+		t.Fatal("Print() does not show the non-bridge master")
+	}
+
+	dot, err := GraphInDOT(nil, []types.Node{node}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(dot, "master ovs0") {
+		t.Fatal("GraphInDOT() does not show the non-bridge master")
+	}
+}
+
 func TestPrintIncludesAddresses(t *testing.T) {
 	master := &types.Bridge{Name: "docker0", Addrs: []net.IPNet{testNet(t, "172.17.0.1/16")}}
 	vm := map[string][]types.Node{

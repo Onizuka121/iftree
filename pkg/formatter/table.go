@@ -8,7 +8,6 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jedib0t/go-pretty/v6/table"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
 	"github.com/t1anz0ng/iftree/pkg/netutil"
@@ -29,25 +28,30 @@ func Table(w io.Writer, m map[string][]types.Node) error {
 
 	for _, bridge := range sortedBridges(m) {
 		for _, vp := range m[bridge] {
-			if vp.NetNsName == "" {
-				logrus.Warnf("no netns name for %+v", vp)
-				continue
-			}
-			id, err := netutil.NsidFromPath(vp.NetNsName)
-			if err != nil {
-				return errors.Wrapf(err, "get nsid from path `%s`", vp.NetNsName)
-			}
-			c := netnsColor(id)
 			ip := addressText(vp.PeerAddrs)
 			if ip == "" {
 				ip = addressText(vp.Addrs)
 			}
+			netnsCell := warnStyle.Render("⚠️ orphaned")
+			if vp.NetNsName != "" {
+				id, err := netutil.NsidFromPath(vp.NetNsName)
+				if err != nil {
+					logrus.Debugf("unable to get nsid from path `%s`: %v", vp.NetNsName, err)
+					id = -1
+				}
+				c := netnsColor(id)
+				netnsCell = netNsStyle.Copy().Foreground(c).Render("📦 " + vp.NetNsName)
+			}
+			peer := vp.PeerNameInNetns
+			if peer == "" {
+				peer = vp.Peer
+			}
 			t.AppendRow(table.Row{
 				bridgeStyle.Render("🌉 " + bridge),
-				netNsStyle.Copy().Foreground(c).Render("📦 " + vp.NetNsName),
+				netnsCell,
 				vethStyle.Render("🔌 " + vp.Veth),
 				ipStyle.Render(ip),
-				peerStyle.Render("⇄ " + vp.PeerNameInNetns),
+				peerStyle.Render("⇄ " + peer),
 				statusLabel(vp.Status),
 			})
 			t.AppendSeparator()
@@ -79,7 +83,7 @@ func TableParis(w io.Writer, vpairs []types.Node) {
 	seen := make(map[string]struct{})
 	pairs := make([]types.Node, 0, len(vpairs))
 	for _, v := range vpairs {
-		h := hashVethpair(v.Veth, v.Peer)
+		h := vethPairKey(v.Veth, v.Peer)
 		if _, ok := seen[h]; ok {
 			continue
 		}
@@ -99,8 +103,12 @@ func TableParis(w io.Writer, vpairs []types.Node) {
 		if v.PeerNameInNetns != "" {
 			peer = v.PeerNameInNetns
 		}
+		vethLabel := "🔌 " + v.Veth
+		if v.MasterName != "" {
+			vethLabel += " · " + v.MasterName
+		}
 		t.AppendRow(table.Row{
-			vethStyle.Render("🔌 " + v.Veth),
+			vethStyle.Render(vethLabel),
 			ipStyle.Render(addressText(v.Addrs)),
 			ipStyle.Render(addressText(v.PeerAddrs)),
 			ipStyle.Render(route),
@@ -114,12 +122,11 @@ func TableParis(w io.Writer, vpairs []types.Node) {
 	fmt.Fprintln(w, tableStyle.Render(tbStr.String()))
 }
 
-func hashVethpair(a, b string) string {
-	res := []rune(a + b)
-	sort.Slice(res, func(i, j int) bool {
-		return res[i] < res[j]
-	})
-	return string(res)
+func vethPairKey(a, b string) string {
+	if a > b {
+		a, b = b, a
+	}
+	return a + "\x00" + b
 }
 
 func netnsColor(id int) lipgloss.Color {
