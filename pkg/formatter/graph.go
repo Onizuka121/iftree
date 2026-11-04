@@ -2,11 +2,12 @@ package formatter
 
 import (
 	"fmt"
+	"html"
 	"net"
 	"os"
+	"sort"
 	"strings"
 
-	graph "github.com/awalterschulze/gographviz"
 	graphviz "github.com/goccy/go-graphviz"
 	"github.com/pkg/errors"
 
@@ -14,156 +15,537 @@ import (
 )
 
 const (
-	label = "label"
+	inkColor        = "#0f172a"
+	mutedInkColor   = "#64748b"
+	bridgeInkColor  = "#065f46"
+	bridgeFillColor = "#ecfdf5"
+	bridgeEdgeColor = "#6ee7b7"
+
+	nsColor     = "#8b5cf6"
+	nsFillColor = "#faf5ff"
+	nsEdgeColor = "#d8b4fe"
+	nsNodeFill  = "#f3e8ff"
+	nsNodeColor = "#c084fc"
+	nsNodeInk   = "#4c1d95"
+
+	routerInkColor  = "#075985"
+	routerFillColor = "#e0f2fe"
+	routerEdgeColor = "#7dd3fc"
+
+	loInkColor  = "#854d0e"
+	loFillColor = "#fefce8"
+	loEdgeColor = "#fde047"
+
+	hostFillColor   = "#ffffff"
+	hostEdgeColor   = "#cbd5e1"
+	linkColor       = "#94a3b8"
+	pairColor       = "#a855f7"
+	gatewayEdge     = "#38bdf8"
+	unbridgedColor  = "#b45309"
+	unbridgedFill   = "#fffbeb"
+	unbridgedBorder = "#fcd34d"
+	unbridgedEdge   = "#f59e0b"
 )
 
-var (
-	nodeAttr = map[string]string{
-		"style": "filled",
-	}
-	netNsAttr = map[string]string{
-		"style":   "filled",
-		"color":   "grey",
-		"nodesep": "4.0",
-		"shape":   "box",
-	}
-	bridgeAttr = map[string]string{
-		"nodesep":  "4.0",
-		"shape":    "octagon",
-		"style":    "filled",
-		"fontsize": "16pt",
-	}
-	loAttr = map[string]string{
-		"shape": "oval",
-		"style": "filled",
-		"color": "#f0c674",
-	}
-	edgeAttr = map[string]string{
-		"color": "black",
-	}
-	redEdgeAttr = map[string]string{
-		"color":     "red",
-		"fontcolor": "red",
-	}
-	inNetNsAttr = map[string]string{
-		"shape": "oval",
-		"style": "filled",
-		"color": "#f0c674",
-	}
-)
+type graphEdge struct {
+	from  string
+	to    string
+	attrs string
+}
 
-func GraphInDOT(brVethsM map[string][]types.Node, vpairs, los []types.Node, bridgeIps map[string]*net.IP) (string, error) {
+type idSequence struct {
+	n int
+}
 
-	graphName := "G"
-	root := graph.NewEscape()
-	if err := root.SetName(graphName); err != nil {
-		return "", err
+func (s *idSequence) next(prefix string) string {
+	s.n++
+	return fmt.Sprintf("%s_%d", prefix, s.n)
+}
+
+type hostVeth struct {
+	node   types.Node
+	id     string
+	bridge string
+	peerID string
+}
+
+type routerUplink struct {
+	name string
+	id   string
+}
+
+type nsEndpoint struct {
+	node   types.Node
+	hostID string
+	peerID string
+}
+
+type nsCluster struct {
+	name      string
+	endpoints []nsEndpoint
+	loopback  *types.Node
+}
+
+type nodeStyle struct {
+	shape    string
+	fill     string
+	border   string
+	penwidth string
+}
+
+func GraphInDOT(brVethsM map[string][]types.Node, vpairs, los []types.Node, bridgeIps map[string]*net.IP, routers []types.Router) (string, error) {
+	ids := &idSequence{}
+	var b strings.Builder
+
+	bridgeNames := make([]string, 0, len(brVethsM))
+	for bridge := range brVethsM {
+		bridgeNames = append(bridgeNames, bridge)
 	}
-	root.AddAttr(graphName, "layout", "fdp")    //nolint:errcheck
-	root.AddAttr(graphName, "splines", "ortho") //nolint:errcheck
-	root.AddAttr(graphName, "ratio", "0.7")     //nolint:errcheck
+	sort.Strings(bridgeNames)
 
-	subGraphM := make(map[string]*graph.SubGraph)
+	bridgeIDs := make(map[string]string, len(bridgeNames))
+	for _, bridge := range bridgeNames {
+		bridgeIDs[bridge] = ids.next("bridge")
+	}
 
-	for bridge, v := range brVethsM {
-		labels := []string{bridge}
-		if ip, ok := bridgeIps[bridge]; ok {
-			labels = append(labels, ip.String())
-		}
-		attr := generateAttr(bridgeAttr, strings.Join(labels, "\\n"))
-
-		if err := root.AddNode(graphName, bridge, attr); err != nil {
-			return "", errors.Wrapf(err, "create bridge node %s", bridge)
-		}
-		for i, vp := range v {
-			// group by vp.NetNsName
-			if vp.NetNsName != "" {
-				sub, ok := subGraphM[vp.NetNsName]
-				if !ok {
-					// init subgraph for netns
-					sub = graph.NewSubGraph(fmt.Sprintf("cluster-%s%c", bridge, 'A'+i))
-					subGraphM[vp.NetNsName] = sub
-
-					err := root.AddSubGraph(graphName, sub.Name, generateAttr(netNsAttr, fmt.Sprintf("NetNS\n%s", vp.NetNsName)))
-					if err != nil {
-						return "", errors.Wrapf(err, "create sub graph [%s] from %+v", sub, vp)
-					}
-				}
-				// host veth
-				err := root.AddNode(graphName, vp.Veth, generateAttr(nodeAttr, vp.Label()))
-				if err != nil {
-					return "", errors.Wrapf(err, "create veth node [%s]", vp.Veth)
-				}
-				// bridege <-> veth edge
-				err = root.AddEdge(vp.Veth, bridge, false, edgeAttr)
-				if err != nil {
-					return "", errors.Wrapf(err, "create edge between [%s] and [%s]", vp.Veth, bridge)
-				}
-
-				// netns veth
-				vethInNsName := fmt.Sprintf("%s_%d", bridge, i)
-				err = root.AddNode(sub.Name, vethInNsName, generateAttr(inNetNsAttr, vp.PeerNameInNetns))
-				if err != nil {
-					return "", errors.Wrapf(err, "create veth node [%s]", vethInNsName)
-				}
-				// veths edge
-				err = root.AddEdge(vp.Veth, vethInNsName, false, redEdgeAttr)
-				if err != nil {
-					return "", errors.Wrapf(err, "create edge between [%s] and [%s]", vp.Veth, vethInNsName)
-				}
-			} else {
-				attr := map[string]string{
-					"label": vp.Veth,
-				}
-				if vp.Orphaned {
-					attr["label"] += "\n(orphaned)"
-				}
-				if err := root.AddNode(graphName, vp.Veth, attr); err != nil {
-					return "", errors.Wrapf(err, "create veth node [%s]", vp.Veth)
-				}
-				if err := root.AddEdge(vp.Veth, bridge, false, edgeAttr); err != nil {
-					return "", errors.Wrapf(err, "create edge between [%s] and [%s]", vp.Veth, bridge)
-				}
+	hostVeths := make([]hostVeth, 0)
+	clustersByName := make(map[string]*nsCluster)
+	for _, bridge := range bridgeNames {
+		nodes := append([]types.Node(nil), brVethsM[bridge]...)
+		sort.Slice(nodes, func(i, j int) bool {
+			if nodes[i].Veth == nodes[j].Veth {
+				return nodes[i].NetNsName < nodes[j].NetNsName
 			}
+			return nodes[i].Veth < nodes[j].Veth
+		})
+		for _, vp := range nodes {
+			hv := hostVeth{
+				node:   vp,
+				id:     ids.next("veth"),
+				bridge: bridge,
+				peerID: ids.next("peer"),
+			}
+			hostVeths = append(hostVeths, hv)
+			if vp.NetNsName == "" {
+				continue
+			}
+			cluster := clustersByName[vp.NetNsName]
+			if cluster == nil {
+				cluster = &nsCluster{name: vp.NetNsName}
+				clustersByName[vp.NetNsName] = cluster
+			}
+			cluster.endpoints = append(cluster.endpoints, nsEndpoint{
+				node:   vp,
+				hostID: hv.id,
+				peerID: hv.peerID,
+			})
 		}
 	}
 
-	// loopbacks
 	for _, lo := range los {
-		if lo.Status == "" {
+		if lo.NetNsName == "" || lo.Status == "" {
 			continue
 		}
-		if sub, ok := subGraphM[lo.NetNsName]; ok {
-			err := root.AddNode(sub.Name, fmt.Sprintf("%s-lo", sub.Name), generateAttr(loAttr, lo.Label()))
-			if err != nil {
-				return "", errors.Wrapf(err, "create loopback in netns [%s]", lo.NetNsName)
-			}
+		if cluster := clustersByName[lo.NetNsName]; cluster != nil {
+			loopback := lo
+			cluster.loopback = &loopback
 		}
 	}
 
-	visited := make(map[string]struct{})
-	for _, vp := range vpairs {
-		if _, ok := visited[vp.Veth]; !ok {
-			root.AddNode(graphName, vp.Veth, generateAttr(nodeAttr, vp.Veth)) //nolint:errcheck
-			visited[vp.Veth] = struct{}{}
-		}
-		if _, ok := visited[vp.Peer]; !ok {
-			root.AddNode(graphName, vp.Peer, generateAttr(nodeAttr, vp.Peer)) //nolint:errcheck
-			visited[vp.Peer] = struct{}{}
-		}
-		root.AddEdge(vp.Veth, vp.Peer, false, generateAttr(edgeAttr, "")) //nolint:errcheck
+	clusters := make([]*nsCluster, 0, len(clustersByName))
+	for _, cluster := range clustersByName {
+		sort.Slice(cluster.endpoints, func(i, j int) bool {
+			if cluster.endpoints[i].node.Veth == cluster.endpoints[j].node.Veth {
+				return cluster.endpoints[i].node.PeerNameInNetns < cluster.endpoints[j].node.PeerNameInNetns
+			}
+			return cluster.endpoints[i].node.Veth < cluster.endpoints[j].node.Veth
+		})
+		clusters = append(clusters, cluster)
 	}
-	return root.String(), nil
+	sort.Slice(clusters, func(i, j int) bool {
+		return clusters[i].name < clusters[j].name
+	})
+
+	edges := make([]graphEdge, 0)
+	uplinks := makeRouterUplinks(routers, bridgeIDs, ids)
+
+	b.WriteString("digraph iftree {\n")
+	writeGraphHeader(&b, len(bridgeNames), len(clusters), len(routers))
+
+	routerIDs := writeRouterNodes(&b, ids, routers, bridgeIDs, uplinks, &edges)
+	if len(routerIDs) > 0 {
+		fmt.Fprintf(&b, "  { rank=source; %s; }\n", strings.Join(routerIDs, "; "))
+	}
+
+	if len(bridgeNames) > 0 || len(uplinks) > 0 {
+		writeHostCluster(&b, bridgeNames, bridgeIDs, bridgeIps, hostVeths, uplinks, &edges)
+	}
+
+	for _, cluster := range clusters {
+		writeNamespaceCluster(&b, ids, cluster, &edges)
+	}
+
+	writeUnbridgedCluster(&b, ids, vpairs, &edges)
+
+	for _, edge := range edges {
+		fmt.Fprintf(&b, "  %s -> %s [%s];\n", edge.from, edge.to, edge.attrs)
+	}
+
+	b.WriteString("}\n")
+	return b.String(), nil
+}
+
+func writeGraphHeader(b *strings.Builder, bridges, namespaces, routers int) {
+	stats := fmt.Sprintf("%d bridges · %d namespaces", bridges, namespaces)
+	if routers > 0 {
+		stats += fmt.Sprintf(" · %d gateways", routers)
+	}
+
+	b.WriteString("  graph [\n")
+	b.WriteString("    layout=\"dot\",\n")
+	b.WriteString("    rankdir=\"TB\",\n")
+	b.WriteString("    bgcolor=\"#ffffff\",\n")
+	b.WriteString("    pad=\"0.5\",\n")
+	b.WriteString("    nodesep=\"0.45\",\n")
+	b.WriteString("    ranksep=\"0.8\",\n")
+	b.WriteString("    splines=\"spline\",\n")
+	b.WriteString("    overlap=\"false\",\n")
+	b.WriteString("    compound=\"true\",\n")
+	b.WriteString("    newrank=\"true\",\n")
+	b.WriteString("    dpi=\"150\",\n")
+	b.WriteString("    fontname=\"DejaVu Sans\",\n")
+	b.WriteString("    fontsize=\"10\",\n")
+	b.WriteString("    labelloc=\"t\",\n")
+	b.WriteString("    labeljust=\"c\",\n")
+	fmt.Fprintf(b, "    label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"0\"><TR><TD><FONT FACE=\"DejaVu Sans\" POINT-SIZE=\"23\" COLOR=\"%s\"><B>iftree</B></FONT></TD></TR><TR><TD><FONT FACE=\"DejaVu Sans\" POINT-SIZE=\"10\" COLOR=\"%s\">%s</FONT></TD></TR></TABLE>>\n",
+		bridgeInkColor, mutedInkColor, html.EscapeString(stats))
+	b.WriteString("  ];\n")
+	b.WriteString("  node [\n")
+	b.WriteString("    shape=\"box\",\n")
+	b.WriteString("    style=\"rounded,filled\",\n")
+	b.WriteString("    fontname=\"DejaVu Sans\",\n")
+	b.WriteString("    fontsize=\"11\",\n")
+	b.WriteString("    margin=\"0.16,0.10\",\n")
+	b.WriteString("    penwidth=\"1.2\",\n")
+	b.WriteString("    color=\"#cbd5e1\",\n")
+	b.WriteString("    fillcolor=\"#ffffff\"\n")
+	b.WriteString("  ];\n")
+	b.WriteString("  edge [\n")
+	b.WriteString("    color=\"#94a3b8\",\n")
+	b.WriteString("    penwidth=\"1.3\",\n")
+	b.WriteString("    arrowsize=\"0.7\",\n")
+	b.WriteString("    dir=\"none\",\n")
+	b.WriteString("    fontname=\"DejaVu Sans\",\n")
+	b.WriteString("    fontsize=\"9\",\n")
+	b.WriteString("    fontcolor=\"#64748b\"\n")
+	b.WriteString("  ];\n")
+}
+
+func writeHostCluster(b *strings.Builder, bridges []string, bridgeIDs map[string]string, bridgeIps map[string]*net.IP, veths []hostVeth, uplinks []routerUplink, edges *[]graphEdge) {
+	b.WriteString("  subgraph cluster_host {\n")
+	b.WriteString(`    label=<<FONT FACE="DejaVu Sans" POINT-SIZE="11" COLOR="#64748b"><B>⌂  host</B></FONT>>;` + "\n")
+	b.WriteString("    labeljust=\"l\";\n")
+	b.WriteString("    labelloc=\"t\";\n")
+	b.WriteString("    style=\"rounded,filled\";\n")
+	b.WriteString("    fillcolor=\"#f8fafc\";\n")
+	b.WriteString("    color=\"#e2e8f0\";\n")
+	b.WriteString("    penwidth=\"1.2\";\n")
+	b.WriteString("    margin=\"18\";\n")
+
+	for _, bridge := range bridges {
+		subtitle := "layer 2 bridge"
+		if ip, ok := bridgeIps[bridge]; ok && ip != nil && len(*ip) > 0 {
+			subtitle = ip.String()
+		}
+		label := nodeLabel(bridge, bridgeInkColor, subtitle, mutedInkColor, 12)
+		writeNode(b, bridgeIDs[bridge], label, nodeStyle{
+			shape:    "hexagon",
+			fill:     bridgeFillColor,
+			border:   bridgeEdgeColor,
+			penwidth: "1.6",
+		})
+	}
+
+	for _, uplink := range uplinks {
+		label := nodeLabel(uplink.name, routerInkColor, "uplink", mutedInkColor, 10)
+		writeNode(b, uplink.id, label, nodeStyle{
+			shape:    "component",
+			fill:     routerFillColor,
+			border:   routerEdgeColor,
+			penwidth: "1.1",
+		})
+	}
+
+	for _, hv := range veths {
+		subtitle := ""
+		subColor := mutedInkColor
+		if hv.node.NetNsName == "" {
+			subtitle = "orphaned"
+			subColor = unbridgedColor
+		}
+		label := nodeLabel(hv.node.Veth, inkColor, subtitle, subColor, 10)
+		writeNode(b, hv.id, label, nodeStyle{
+			shape:    "component",
+			fill:     hostFillColor,
+			border:   hostEdgeColor,
+			penwidth: "1.1",
+		})
+		*edges = append(*edges, graphEdge{
+			from:  bridgeIDs[hv.bridge],
+			to:    hv.id,
+			attrs: fmt.Sprintf(`color="%s", penwidth="1.3"`, linkColor),
+		})
+	}
+
+	b.WriteString("  }\n")
+}
+
+func writeNamespaceCluster(b *strings.Builder, ids *idSequence, cluster *nsCluster, edges *[]graphEdge) {
+	fmt.Fprintf(b, "  subgraph cluster_%s {\n", ids.next("ns"))
+	fmt.Fprintf(b, "    label=%s;\n", clusterLabel("NETNS", cluster.name, nsColor))
+	b.WriteString("    labeljust=\"l\";\n")
+	b.WriteString("    labelloc=\"b\";\n")
+	b.WriteString("    style=\"rounded,filled\";\n")
+	fmt.Fprintf(b, "    fillcolor=\"%s\";\n", nsFillColor)
+	fmt.Fprintf(b, "    color=\"%s\";\n", nsEdgeColor)
+	b.WriteString("    penwidth=\"1.2\";\n")
+	b.WriteString("    margin=\"16\";\n")
+
+	sameRank := make([]string, 0, len(cluster.endpoints)+1)
+	for _, ep := range cluster.endpoints {
+		subtitle, subColor := statusSubtitle(ep.node.Status)
+		label := nodeLabel(endpointName(ep.node), nsNodeInk, subtitle, subColor, 10)
+		writeNode(b, ep.peerID, label, nodeStyle{
+			shape:    "component",
+			fill:     nsNodeFill,
+			border:   nsNodeColor,
+			penwidth: "1.1",
+		})
+		sameRank = append(sameRank, ep.peerID)
+		*edges = append(*edges, graphEdge{
+			from:  ep.hostID,
+			to:    ep.peerID,
+			attrs: fmt.Sprintf(`color="%s", penwidth="1.6"`, pairColor),
+		})
+	}
+
+	if cluster.loopback != nil {
+		subtitle, subColor := statusSubtitle(cluster.loopback.Status)
+		loID := ids.next("lo")
+		label := nodeLabel("lo", loInkColor, subtitle, subColor, 10)
+		writeNode(b, loID, label, nodeStyle{
+			shape:    "circle",
+			fill:     loFillColor,
+			border:   loEdgeColor,
+			penwidth: "1.1",
+		})
+		sameRank = append(sameRank, loID)
+	}
+
+	if len(sameRank) > 1 {
+		fmt.Fprintf(b, "    { rank=same; %s; }\n", strings.Join(sameRank, "; "))
+	}
+	b.WriteString("  }\n")
+}
+
+func writeRouterNodes(b *strings.Builder, ids *idSequence, routers []types.Router, bridgeIDs map[string]string, uplinks []routerUplink, edges *[]graphEdge) []string {
+	uplinkIDs := make(map[string]string, len(uplinks))
+	for _, uplink := range uplinks {
+		uplinkIDs[uplink.name] = uplink.id
+	}
+
+	seen := make(map[string]struct{})
+	routerIDs := make([]string, 0, len(routers))
+	ordered := append([]types.Router(nil), routers...)
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].IP.Equal(ordered[j].IP) {
+			return ordered[i].Iface < ordered[j].Iface
+		}
+		return ordered[i].IP.String() < ordered[j].IP.String()
+	})
+
+	for _, router := range ordered {
+		if len(router.IP) == 0 {
+			continue
+		}
+		key := router.IP.String() + "|" + router.Iface
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		subtitle := router.IP.String()
+		if router.Iface != "" {
+			subtitle += "  ·  via " + router.Iface
+		}
+		id := ids.next("router")
+		label := nodeLabel("gateway", routerInkColor, subtitle, mutedInkColor, 12)
+		writeNode(b, id, label, nodeStyle{
+			shape:    "box3d",
+			fill:     routerFillColor,
+			border:   routerEdgeColor,
+			penwidth: "1.4",
+		})
+		routerIDs = append(routerIDs, id)
+
+		if bridgeID, ok := bridgeIDs[router.Iface]; ok {
+			*edges = append(*edges, graphEdge{
+				from:  id,
+				to:    bridgeID,
+				attrs: fmt.Sprintf(`color="%s", style="dashed", penwidth="1.4", dir="forward"`, gatewayEdge),
+			})
+		} else if uplinkID, ok := uplinkIDs[router.Iface]; ok {
+			*edges = append(*edges, graphEdge{
+				from:  id,
+				to:    uplinkID,
+				attrs: fmt.Sprintf(`color="%s", style="dashed", penwidth="1.4", dir="forward"`, gatewayEdge),
+			})
+		}
+	}
+
+	return routerIDs
+}
+
+func makeRouterUplinks(routers []types.Router, bridgeIDs map[string]string, ids *idSequence) []routerUplink {
+	seen := make(map[string]struct{})
+	names := make([]string, 0)
+	for _, router := range routers {
+		if router.Iface == "" {
+			continue
+		}
+		if _, ok := bridgeIDs[router.Iface]; ok {
+			continue
+		}
+		if _, ok := seen[router.Iface]; ok {
+			continue
+		}
+		seen[router.Iface] = struct{}{}
+		names = append(names, router.Iface)
+	}
+	sort.Strings(names)
+
+	uplinks := make([]routerUplink, 0, len(names))
+	for _, name := range names {
+		uplinks = append(uplinks, routerUplink{name: name, id: ids.next("uplink")})
+	}
+	return uplinks
+}
+
+func writeUnbridgedCluster(b *strings.Builder, ids *idSequence, vpairs []types.Node, edges *[]graphEdge) {
+	seen := make(map[string]struct{})
+	pairs := make([]types.Node, 0, len(vpairs))
+	for _, vp := range vpairs {
+		key := hashVethpair(vp.Veth, vp.Peer)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		pairs = append(pairs, vp)
+	}
+	if len(pairs) == 0 {
+		return
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].Veth == pairs[j].Veth {
+			return pairs[i].Peer < pairs[j].Peer
+		}
+		return pairs[i].Veth < pairs[j].Veth
+	})
+
+	b.WriteString("  subgraph cluster_unbridged {\n")
+	fmt.Fprintf(b, "    label=%s;\n", clusterLabel("NOT BRIDGED", "", unbridgedColor))
+	b.WriteString("    labeljust=\"l\";\n")
+	b.WriteString("    labelloc=\"t\";\n")
+	b.WriteString("    style=\"rounded,filled\";\n")
+	fmt.Fprintf(b, "    fillcolor=\"%s\";\n", unbridgedFill)
+	fmt.Fprintf(b, "    color=\"%s\";\n", unbridgedBorder)
+	b.WriteString("    penwidth=\"1.2\";\n")
+	b.WriteString("    margin=\"16\";\n")
+
+	for _, pair := range pairs {
+		leftID := ids.next("unbridged")
+		writeNode(b, leftID, unbridgedCard(pair.Veth, routeText(pair)), nodeStyle{
+			shape:    "component",
+			fill:     unbridgedFill,
+			border:   unbridgedBorder,
+			penwidth: "1.1",
+		})
+
+		if pair.Peer == "" {
+			continue
+		}
+		rightID := ids.next("unbridged")
+		writeNode(b, rightID, unbridgedCard(pair.Peer, ""), nodeStyle{
+			shape:    "component",
+			fill:     unbridgedFill,
+			border:   unbridgedBorder,
+			penwidth: "1.1",
+		})
+		*edges = append(*edges, graphEdge{
+			from:  leftID,
+			to:    rightID,
+			attrs: fmt.Sprintf(`color="%s", penwidth="1.4"`, unbridgedEdge),
+		})
+	}
+
+	b.WriteString("  }\n")
+}
+
+func unbridgedCard(name, subtitle string) string {
+	return nodeLabel(name, unbridgedColor, subtitle, mutedInkColor, 10)
+}
+
+func nodeLabel(title, titleColor, subtitle, subColor string, titleSize int) string {
+	if titleSize == 0 {
+		titleSize = 11
+	}
+
+	var b strings.Builder
+	b.WriteString(`<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="1">`)
+	fmt.Fprintf(&b, `<TR><TD ALIGN="CENTER"><FONT FACE="DejaVu Sans" POINT-SIZE="%d" COLOR="%s"><B>%s</B></FONT></TD></TR>`, titleSize, titleColor, html.EscapeString(title))
+	if subtitle != "" {
+		fmt.Fprintf(&b, `<TR><TD ALIGN="CENTER"><FONT FACE="DejaVu Sans" POINT-SIZE="9" COLOR="%s">%s</FONT></TD></TR>`, subColor, html.EscapeString(subtitle))
+	}
+	b.WriteString(`</TABLE>>`)
+	return b.String()
+}
+
+func clusterLabel(kind, text, color string) string {
+	value := fmt.Sprintf(`<FONT FACE="DejaVu Sans" POINT-SIZE="9" COLOR="%s"><B>%s</B></FONT>`, color, html.EscapeString(kind))
+	if text != "" {
+		value += fmt.Sprintf(`  <FONT FACE="DejaVu Sans" POINT-SIZE="11" COLOR="#334155">%s</FONT>`, html.EscapeString(text))
+	}
+	return fmt.Sprintf(`<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="0"><TR><TD>%s</TD></TR></TABLE>>`, value)
+}
+
+func statusSubtitle(status string) (string, string) {
+	s := strings.ToLower(strings.TrimSpace(status))
+	switch s {
+	case "":
+		return "", mutedInkColor
+	case "up":
+		return "● up", "#16a34a"
+	case "down", "lowerlayerdown", "notpresent":
+		return "○ " + s, "#dc2626"
+	default:
+		return "○ " + s, unbridgedColor
+	}
+}
+
+func writeNode(b *strings.Builder, id, label string, style nodeStyle) {
+	fmt.Fprintf(b, "    %s [label=%s, shape=\"%s\", fillcolor=\"%s\", color=\"%s\", penwidth=\"%s\"];\n",
+		id, label, style.shape, style.fill, style.border, style.penwidth)
 }
 
 func GenImage(data []byte, oGraphName *string, gType string) (fn string, err error) {
-
 	g := graphviz.New()
+	defer g.Close()
 
 	graph, err := graphviz.ParseBytes(data)
 	if err != nil {
 		return "", errors.Wrap(err, "parse dot bytes")
 	}
+	defer graph.Close()
 	fn = fmt.Sprintf("%s.%s", *oGraphName, gType)
 	f, err := os.Create(fn)
 	if err != nil {
@@ -185,15 +567,4 @@ func GenImage(data []byte, oGraphName *string, gType string) (fn string, err err
 		return fn, errors.Wrap(err, "render image")
 	}
 	return fn, nil
-}
-
-func generateAttr(base map[string]string, lb string) map[string]string {
-	m := make(map[string]string)
-	for k, v := range base {
-		m[k] = v
-	}
-	if lb != "" {
-		m[label] = lb
-	}
-	return m
 }

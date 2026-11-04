@@ -5,9 +5,9 @@
 
 # ☘️ iftree
 
-`iftree` command visulize local network interfaces.
+`iftree` command visualizes local network interfaces.
 
-intent for better understanding container networks :D
+intended for better understanding container networks :D
 
 [![golangci-lint](https://github.com/t1anz0ng/iftree/actions/workflows/golangci-lint.yml/badge.svg?branch=main)](https://github.com/t1anz0ng/iftree/actions/workflows/golangci-lint.yml)
 [![CodeQL](https://github.com/t1anz0ng/iftree/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/t1anz0ng/iftree/actions/workflows/codeql-analysis.yml)
@@ -33,7 +33,9 @@ intent for better understanding container networks :D
 
 **Features**
 
-- [x] **visualize** Veth/bridge connections
+- [x] **visualize** veth/bridge connections
+- [x] **icons** with an automatic topology layout
+- [x] **gateway** detection from the default route
 - [x] **table** output
 - [x] **rich** text
 - [x] rendering **image**

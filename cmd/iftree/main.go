@@ -26,7 +26,7 @@ var (
 	debug = pflag.BoolP("debug", "d", false, "print debug message")
 
 	oNotBridgedVeths = pflag.BoolP("all", "a", true, "show all veths, including not bridged.")
-	oGraph           = pflag.BoolP("graph", "g", false, "output in png by defaul")
+	oGraph           = pflag.BoolP("graph", "g", false, "output a topology graph")
 	oGraphType       = pflag.StringP("gtype", "T", "dot", `graph output type, "jpg", "png", "svg", "dot"(graphviz dot language(https://graphviz.org/doc/info/lang.html)`)
 	oGraphName       = pflag.StringP("output", "O", "output", "graph output name/path")
 
@@ -42,29 +42,28 @@ var (
 func init() {
 	pflag.Usage = func() {
 		fmt.Printf(`Usage:
-iftree [options]
+  iftree [options]
 
-Example:
-  generate tree output
-    # sudo iftree 
-  generate png graph with name "output.png"
+Examples:
+  generate the terminal tree
+    # sudo iftree
+  generate a png graph named "output.png"
     # sudo iftree --graph -Tpng -Ooutput.png
-  generate table output
+  generate a table
     # sudo iftree --table
 
-  -d, --debug		print debug message
-  -t, --table		output in table
-  -g, --graph		output in graphviz dot language(https://graphviz.org/doc/info/lang.html
-    -O, --output	string   graph output name/path (default "output")
-    -T, --gtype		string    graph output type, "jpg", "png", "svg", "dot" (graphviz dot language) default "png"
-  -a, --all	 	show all veths, including unused.
-Help Options:
-  -h, --help       Show this help message
+Options:
+  -d, --debug              print debug messages
+  -t, --table              output in table
+  -g, --graph              output a topology graph
+  -O, --output string      graph output name/path (default "output")
+  -T, --gtype string       graph output type: jpg, png, svg, dot (default "dot")
+  -a, --all                show unbridged veth pairs too (default true)
+  -h, --help               show this help message
 
 version: %s
 `, version)
 	}
-
 }
 
 func helper() error {
@@ -95,7 +94,6 @@ func main() {
 		logrus.SetLevel(logrus.ErrorLevel)
 	}
 
-	// Lock the OS Thread so we don't accidentally switch namespaces
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -115,20 +113,21 @@ func main() {
 	}
 	logrus.Debugf("net link list:\n%+v\n", ll)
 
-	bridgeVethM := make(map[string][]types.Node) // map bridge <-> veth paris
+	bridgeVethM := make(map[string][]types.Node)
 	unBridgedVpairs := []types.Node{}
-	bridgeIps := make(map[string]*net.IP) // bridge ip
-	loS := []types.Node{}                 // loopback
+	bridgeIps := make(map[string]*net.IP)
+	loS := []types.Node{}
+	routers := defaultRouters()
+	logrus.Debugf("default routers: %+v", routers)
 
 	origin, err := netns.Get()
 	if err != nil {
-		logrus.Fatalf("failed get current netne, %v", err)
+		logrus.Fatalf("failed get current netns, %v", err)
 	}
 
 	for _, link := range ll {
 		veth, ok := link.(*netlink.Veth)
 		if !ok {
-			// skip device not enslaved to any bridge
 			logrus.Debugf("skip %s, type: %s", link.Attrs().Name, link.Type())
 			continue
 		}
@@ -159,8 +158,12 @@ func main() {
 				NetNsID: veth.NetNsID,
 			}
 			if len(routes) > 0 {
-				// TODO: more than one IP?
-				node.Route = routes[0].Dst.IP
+				for _, route := range routes {
+					if route.Dst != nil && !route.Dst.IP.IsUnspecified() {
+						node.Route = route.Dst.IP
+						break
+					}
+				}
 			}
 			unBridgedVpairs = append(unBridgedVpairs, node)
 			continue
@@ -171,9 +174,7 @@ func main() {
 			logrus.Fatal(err)
 		}
 
-		// if master is not bridge
 		if _, ok := master.(*netlink.Bridge); !ok {
-			// TODO: what if master is not bridge?
 			continue
 		}
 		bridge := master.Attrs().Name
@@ -226,7 +227,7 @@ func main() {
 	switch {
 	case *oGraph:
 		buf := bytes.Buffer{}
-		output, err := formatter.GraphInDOT(bridgeVethM, unBridgedVpairs, loS, bridgeIps)
+		output, err := formatter.GraphInDOT(bridgeVethM, unBridgedVpairs, loS, bridgeIps, routers)
 		if err != nil {
 			logrus.Fatal(errors.Unwrap(err))
 		}
@@ -264,6 +265,41 @@ func main() {
 		}
 		return
 	default:
-		formatter.Print(defaultOutput, bridgeVethM, netNsMap, unBridgedVpairs, *oNotBridgedVeths)
+		formatter.Print(defaultOutput, bridgeVethM, netNsMap, unBridgedVpairs, loS, routers, *oNotBridgedVeths)
 	}
+}
+
+func defaultRouters() []types.Router {
+	routes, err := netlink.RouteList(nil, netlink.FAMILY_V4)
+	if err != nil {
+		logrus.Debugf("unable to list routes: %v", err)
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	routers := make([]types.Router, 0)
+	for _, route := range routes {
+		if route.Gw == nil || !isDefaultRoute(route.Dst) {
+			continue
+		}
+		iface := ""
+		if link, err := netlink.LinkByIndex(route.LinkIndex); err == nil {
+			iface = link.Attrs().Name
+		}
+		key := route.Gw.String() + "|" + iface
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		routers = append(routers, types.Router{IP: route.Gw, Iface: iface})
+	}
+	return routers
+}
+
+func isDefaultRoute(dst *net.IPNet) bool {
+	if dst == nil {
+		return true
+	}
+	ones, bits := dst.Mask.Size()
+	return ones == 0 && bits == 32
 }

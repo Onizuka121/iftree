@@ -13,19 +13,10 @@ const (
 	LoType
 )
 
-var (
-	typeMap = map[NodeType]string{ //nolint
-		VethType:   "veth",
-		BridgeType: "bridge",
-		LoType:     "lo",
-	}
-)
-
 type Node struct {
 	ID   string
 	Type NodeType
 
-	// veth
 	Veth            string
 	Peer            string
 	PeerNameInNetns string
@@ -36,13 +27,11 @@ type Node struct {
 	Master          *Bridge
 	Route           net.IP
 
-	// general
 	Name   string
 	Status string
 }
 
 func (n *Node) Label() string {
-	//FIXME: deprecate VETH
 	if n.Name == "" {
 		n.Name = n.Veth
 	}
@@ -57,4 +46,9 @@ func (n *Node) Label() string {
 type Bridge struct {
 	Name string
 	IP   *net.IP
+}
+
+type Router struct {
+	IP    net.IP
+	Iface string
 }

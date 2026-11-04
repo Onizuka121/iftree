@@ -3,7 +3,6 @@ package formatter
 import (
 	"fmt"
 	"io"
-
 	"sort"
 	"strings"
 
@@ -21,16 +20,15 @@ var (
 )
 
 func Table(w io.Writer, m map[string][]types.Node) error {
-
 	tbStr := strings.Builder{}
 	t := table.NewWriter()
 	t.SetOutputMirror(&tbStr)
 
-	t.SetTitle(boldItalicTextStyle.SetString("bridge <---> veth <---> veth in container, GROUP BY NetNS").String())
-	t.AppendHeader(table.Row{"bridge", "netns", "veth", "ifname"})
+	t.SetTitle(tableTitleStyle.Render("🌉  bridges · 📦 containers · 🔌 veth pairs"))
+	t.AppendHeader(table.Row{"🌉 bridge", "📦 netns", "🔌 veth", "🏷 ifname", "● status"})
 
-	for bridge, v := range m {
-		for _, vp := range v {
+	for _, bridge := range sortedBridges(m) {
+		for _, vp := range m[bridge] {
 			if vp.NetNsName == "" {
 				logrus.Warnf("no netns name for %+v", vp)
 				continue
@@ -39,12 +37,14 @@ func Table(w io.Writer, m map[string][]types.Node) error {
 			if err != nil {
 				return errors.Wrapf(err, "get nsid from path `%s`", vp.NetNsName)
 			}
-			c := lipgloss.Color(tableNsColors[id%len(tableNsColors)][0])
+			c := netnsColor(id)
 			t.AppendRow(table.Row{
-				bridgeStyle.SetString(bridge),
-				netNsStyle.Copy().Foreground(c).SetString(vp.NetNsName),
-				basicTextStyle.SetString(vp.Veth),
-				basicTextStyle.SetString(vp.PeerNameInNetns)})
+				bridgeStyle.Render("🌉 " + bridge),
+				netNsStyle.Copy().Foreground(c).Render("📦 " + vp.NetNsName),
+				vethStyle.Render("🔌 " + vp.Veth),
+				peerStyle.Render("⇄ " + vp.PeerNameInNetns),
+				statusLabel(vp.Status),
+			})
 			t.AppendSeparator()
 		}
 	}
@@ -56,12 +56,11 @@ func Table(w io.Writer, m map[string][]types.Node) error {
 	t.SetStyle(table.StyleRounded)
 	t.Render()
 
-	fmt.Fprintln(w, tableStype.Render(tbStr.String()))
+	fmt.Fprintln(w, tableStyle.Render(tbStr.String()))
 	return nil
 }
 
 func TableParis(w io.Writer, vpairs []types.Node) {
-
 	if len(vpairs) == 0 {
 		return
 	}
@@ -69,34 +68,53 @@ func TableParis(w io.Writer, vpairs []types.Node) {
 	t := table.NewWriter()
 	t.SetOutputMirror(&tbStr)
 
-	// (experimental)
-	t.SetTitle("not bridged veth pairs")
-	t.AppendHeader(table.Row{"veth", "route", "pair(In NetNS)"})
-	visited := make(map[string]struct{})
+	t.SetTitle(tableTitleStyle.Render("🔗  unbridged veth pairs"))
+	t.AppendHeader(table.Row{"🔌 veth", "🧭 route", "📦 peer"})
+
+	seen := make(map[string]struct{})
+	pairs := make([]types.Node, 0, len(vpairs))
 	for _, v := range vpairs {
 		h := hashVethpair(v.Veth, v.Peer)
-		if _, ok := visited[h]; ok {
+		if _, ok := seen[h]; ok {
 			continue
 		}
+		seen[h] = struct{}{}
+		pairs = append(pairs, v)
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		return pairs[i].Veth < pairs[j].Veth
+	})
+
+	for _, v := range pairs {
+		route := ""
+		if len(v.Route) > 0 && !v.Route.IsUnspecified() {
+			route = v.Route.String()
+		}
 		t.AppendRow(table.Row{
-			basicTextStyle.SetString(v.Veth),
-			basicTextStyle.SetString(v.Route.String()),
-			basicTextStyle.SetString(v.Peer),
+			vethStyle.Render("🔌 " + v.Veth),
+			ipStyle.Render(route),
+			peerStyle.Render("⇄ " + v.Peer),
 		})
 		t.AppendSeparator()
-		visited[h] = struct{}{}
 	}
 	t.SetAutoIndex(true)
 	t.SetStyle(table.StyleRounded)
 	t.Render()
-	fmt.Fprintln(w, tbStr.String())
+	fmt.Fprintln(w, tableStyle.Render(tbStr.String()))
 }
 
 func hashVethpair(a, b string) string {
-	// FIXME, replace with a better hash function
 	res := []rune(a + b)
 	sort.Slice(res, func(i, j int) bool {
 		return res[i] < res[j]
 	})
 	return string(res)
+}
+
+func netnsColor(id int) lipgloss.Color {
+	index := id % len(tableNsColors)
+	if index < 0 {
+		index += len(tableNsColors)
+	}
+	return lipgloss.Color(tableNsColors[index][0])
 }

@@ -3,7 +3,6 @@ module github.com/t1anz0ng/iftree
 go 1.17
 
 require (
-	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/charmbracelet/lipgloss v0.5.0
 	github.com/containerd/nerdctl v0.22.0
 	github.com/goccy/go-graphviz v0.0.9
