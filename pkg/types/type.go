@@ -26,6 +26,8 @@ type Node struct {
 	NetNsName       string
 	Master          *Bridge
 	Route           net.IP
+	Addrs           []net.IPNet
+	PeerAddrs       []net.IPNet
 
 	Name   string
 	Status string
@@ -44,11 +46,12 @@ func (n *Node) Label() string {
 }
 
 type Bridge struct {
-	Name string
-	IP   *net.IP
+	Name  string
+	Addrs []net.IPNet
 }
 
 type Router struct {
 	IP    net.IP
 	Iface string
+	Addrs []net.IPNet
 }

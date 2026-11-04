@@ -25,7 +25,7 @@ func Table(w io.Writer, m map[string][]types.Node) error {
 	t.SetOutputMirror(&tbStr)
 
 	t.SetTitle(tableTitleStyle.Render("🌉  bridges · 📦 containers · 🔌 veth pairs"))
-	t.AppendHeader(table.Row{"🌉 bridge", "📦 netns", "🔌 veth", "🏷 ifname", "● status"})
+	t.AppendHeader(table.Row{"🌉 bridge", "📦 netns", "🔌 veth", "🌐 ip", "🏷 ifname", "● status"})
 
 	for _, bridge := range sortedBridges(m) {
 		for _, vp := range m[bridge] {
@@ -38,10 +38,15 @@ func Table(w io.Writer, m map[string][]types.Node) error {
 				return errors.Wrapf(err, "get nsid from path `%s`", vp.NetNsName)
 			}
 			c := netnsColor(id)
+			ip := addressText(vp.PeerAddrs)
+			if ip == "" {
+				ip = addressText(vp.Addrs)
+			}
 			t.AppendRow(table.Row{
 				bridgeStyle.Render("🌉 " + bridge),
 				netNsStyle.Copy().Foreground(c).Render("📦 " + vp.NetNsName),
 				vethStyle.Render("🔌 " + vp.Veth),
+				ipStyle.Render(ip),
 				peerStyle.Render("⇄ " + vp.PeerNameInNetns),
 				statusLabel(vp.Status),
 			})
@@ -69,7 +74,7 @@ func TableParis(w io.Writer, vpairs []types.Node) {
 	t.SetOutputMirror(&tbStr)
 
 	t.SetTitle(tableTitleStyle.Render("🔗  unbridged veth pairs"))
-	t.AppendHeader(table.Row{"🔌 veth", "🧭 route", "📦 peer"})
+	t.AppendHeader(table.Row{"🔌 veth", "🌐 host ip", "🌐 peer ip", "🧭 route", "📦 peer"})
 
 	seen := make(map[string]struct{})
 	pairs := make([]types.Node, 0, len(vpairs))
@@ -90,10 +95,16 @@ func TableParis(w io.Writer, vpairs []types.Node) {
 		if len(v.Route) > 0 && !v.Route.IsUnspecified() {
 			route = v.Route.String()
 		}
+		peer := v.Peer
+		if v.PeerNameInNetns != "" {
+			peer = v.PeerNameInNetns
+		}
 		t.AppendRow(table.Row{
 			vethStyle.Render("🔌 " + v.Veth),
+			ipStyle.Render(addressText(v.Addrs)),
+			ipStyle.Render(addressText(v.PeerAddrs)),
 			ipStyle.Render(route),
-			peerStyle.Render("⇄ " + v.Peer),
+			peerStyle.Render("⇄ " + peer),
 		})
 		t.AppendSeparator()
 	}

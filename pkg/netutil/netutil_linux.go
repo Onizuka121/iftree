@@ -78,16 +78,38 @@ func listNetNsPath() ([]string, error) {
 
 // GetPeerInNs enter target netns to get veth peer's name
 // root needed
-func GetPeerInNs(ns string, origin netns.NsHandle, peerIdx int) (netlink.Link, error) {
-	return netnsGetName(ns, origin, func() (netlink.Link, error) {
-		return netlink.LinkByIndex(peerIdx)
+func GetPeerInNs(ns string, origin netns.NsHandle, peerIdx int) (netlink.Link, []netlink.Addr, error) {
+	var addrs []netlink.Addr
+	link, err := netnsGetName(ns, origin, func() (netlink.Link, error) {
+		l, err := netlink.LinkByIndex(peerIdx)
+		if err != nil {
+			return nil, err
+		}
+		if a, err := netlink.AddrList(l, netlink.FAMILY_ALL); err != nil {
+			logrus.Debugf("unable to list addresses for %s: %v", l.Attrs().Name, err)
+		} else {
+			addrs = a
+		}
+		return l, nil
 	})
+	return link, addrs, err
 }
 
-func GetLoInNs(ns string, origin netns.NsHandle) (netlink.Link, error) {
-	return netnsGetName(ns, origin, func() (netlink.Link, error) {
-		return netlink.LinkByName("lo")
+func GetLoInNs(ns string, origin netns.NsHandle) (netlink.Link, []netlink.Addr, error) {
+	var addrs []netlink.Addr
+	link, err := netnsGetName(ns, origin, func() (netlink.Link, error) {
+		l, err := netlink.LinkByName("lo")
+		if err != nil {
+			return nil, err
+		}
+		if a, err := netlink.AddrList(l, netlink.FAMILY_ALL); err != nil {
+			logrus.Debugf("unable to list addresses for %s: %v", l.Attrs().Name, err)
+		} else {
+			addrs = a
+		}
+		return l, nil
 	})
+	return link, addrs, err
 }
 
 func netnsGetName(ns string, origin netns.NsHandle, fn func() (netlink.Link, error)) (link netlink.Link, err error) {

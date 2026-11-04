@@ -34,6 +34,7 @@ intended for better understanding container networks :D
 **Features**
 
 - [x] **visualize** veth/bridge connections
+- [x] **interface IPs** with IPv4/IPv6 prefixes
 - [x] **icons** with an automatic topology layout
 - [x] **gateway** detection from the default route
 - [x] **table** output

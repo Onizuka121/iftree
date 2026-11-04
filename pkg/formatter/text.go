@@ -30,11 +30,11 @@ func Print(w io.Writer, vm map[string][]types.Node, netNsMap map[int]string, vpa
 	}
 
 	stats := []string{
-		fmt.Sprintf("%d bridges", len(vm)),
-		fmt.Sprintf("%d namespaces", len(nsSet)),
+		countText(len(vm), "bridge"),
+		countText(len(nsSet), "namespace"),
 	}
 	if len(routers) > 0 {
-		stats = append(stats, fmt.Sprintf("%d gateways", len(routers)))
+		stats = append(stats, countText(len(routers), "gateway"))
 	}
 	b.WriteString("  ")
 	b.WriteString(subtitleStyle.Render(strings.Join(stats, "  ·  ")))
@@ -57,7 +57,7 @@ func Print(w io.Writer, vm map[string][]types.Node, netNsMap map[int]string, vpa
 		b.WriteString("\n")
 		b.WriteString(sectionStyle.Render("🌐  Gateways"))
 		b.WriteString("\n")
-		writeRouters(&b, routers)
+		writeRouters(&b, routers, vm)
 	}
 
 	if all && len(vpairs) > 0 {
@@ -78,7 +78,7 @@ func Print(w io.Writer, vm map[string][]types.Node, netNsMap map[int]string, vpa
 
 func writeBridge(b *strings.Builder, name string, nodes []types.Node, loByNs map[string]types.Node) {
 	header := []string{"🌉", bridgeStyle.Render(name)}
-	if ip := bridgeIP(nodes); ip != "" {
+	if ip := bridgeAddresses(nodes); ip != "" {
 		header = append(header, ipStyle.Render(ip))
 	}
 	if status := linkStatus(name); status != "" {
@@ -106,7 +106,7 @@ func writeBridge(b *strings.Builder, name string, nodes []types.Node, loByNs map
 
 	for i, ns := range namespaces {
 		lastNs := i == len(namespaces)-1 && len(orphans) == 0
-		nsHeader := []string{"📦", netNsStyle.Render(ns), ipStyle.Render(vethCount(len(groups[ns])))}
+		nsHeader := []string{"📦", netNsStyle.Render(ns), ipStyle.Render(countText(len(groups[ns]), "veth"))}
 		fmt.Fprintf(b, "  %s %s\n", treeStyle.Render(treeBranch(lastNs)), strings.Join(nsHeader, "  "))
 
 		prefix := treePrefix(lastNs)
@@ -128,6 +128,9 @@ func writeBridge(b *strings.Builder, name string, nodes []types.Node, loByNs map
 		}
 		if hasLo {
 			fields := []string{"🔁", vethStyle.Render("lo")}
+			if ip := addressText(lo.Addrs); ip != "" {
+				fields = append(fields, ipStyle.Render(ip))
+			}
 			if status := statusLabel(lo.Status); status != "" {
 				fields = append(fields, status)
 			}
@@ -138,6 +141,9 @@ func writeBridge(b *strings.Builder, name string, nodes []types.Node, loByNs map
 	for i, n := range orphans {
 		last := i == len(orphans)-1
 		fields := []string{"⚠️", vethStyle.Render(n.Veth), warnStyle.Render("orphaned")}
+		if ip := addressText(n.Addrs); ip != "" {
+			fields = append(fields, ipStyle.Render(ip))
+		}
 		if n.PeerNameInNetns != "" {
 			fields = append(fields, peerStyle.Render("⇄ "+n.PeerNameInNetns))
 		}
@@ -151,13 +157,16 @@ func writeBridge(b *strings.Builder, name string, nodes []types.Node, loByNs map
 
 func writeEndpoint(b *strings.Builder, prefix string, last bool, n types.Node) {
 	fields := []string{"🔌", vethStyle.Render(n.Veth), peerStyle.Render("⇄ " + endpointName(n))}
+	if ip := addressText(n.PeerAddrs); ip != "" {
+		fields = append(fields, ipStyle.Render(ip))
+	}
 	if status := statusLabel(n.Status); status != "" {
 		fields = append(fields, status)
 	}
 	fmt.Fprintf(b, "  %s%s %s\n", treeStyle.Render(prefix), treeStyle.Render(treeBranch(last)), strings.Join(fields, "  "))
 }
 
-func writeRouters(b *strings.Builder, routers []types.Router) {
+func writeRouters(b *strings.Builder, routers []types.Router, bridges map[string][]types.Node) {
 	sorted := append([]types.Router(nil), routers...)
 	sort.Slice(sorted, func(i, j int) bool {
 		if sorted[i].IP.Equal(sorted[j].IP) {
@@ -167,9 +176,14 @@ func writeRouters(b *strings.Builder, routers []types.Router) {
 	})
 
 	for i, r := range sorted {
-		fields := []string{"🌐", ipStyle.Render(r.IP.String())}
+		fields := []string{"🌐", ipStyle.Render("gateway " + r.IP.String())}
 		if r.Iface != "" {
 			fields = append(fields, peerStyle.Render("via "+r.Iface))
+		}
+		if local := addressText(r.Addrs); local != "" {
+			if _, ok := bridges[r.Iface]; !ok {
+				fields = append(fields, ipStyle.Render("local "+local))
+			}
 		}
 		fmt.Fprintf(b, "  %s %s\n", treeStyle.Render(treeBranch(i == len(sorted)-1)), strings.Join(fields, "  "))
 	}
@@ -191,7 +205,20 @@ func writeVethPairs(b *strings.Builder, vpairs []types.Node, netNsMap map[int]st
 	})
 
 	for i, p := range pairs {
-		fields := []string{"🔗", vethStyle.Render(p.Veth), peerStyle.Render("⇄ " + p.Peer)}
+		peerName := p.Peer
+		if p.PeerNameInNetns != "" {
+			peerName = p.PeerNameInNetns
+		}
+		if peerName == "" {
+			peerName = "(unknown)"
+		}
+		fields := []string{"🔗", vethStyle.Render(p.Veth), peerStyle.Render("⇄ " + peerName)}
+		if ip := addressText(p.Addrs); ip != "" {
+			fields = append(fields, ipStyle.Render(ip))
+		}
+		if ip := addressText(p.PeerAddrs); ip != "" && ip != addressText(p.Addrs) {
+			fields = append(fields, ipStyle.Render("peer "+ip))
+		}
 		if route := routeText(p); route != "" {
 			fields = append(fields, ipStyle.Render(route))
 		}
@@ -222,10 +249,13 @@ func sortedBridges(vm map[string][]types.Node) []string {
 	return names
 }
 
-func bridgeIP(nodes []types.Node) string {
+func bridgeAddresses(nodes []types.Node) string {
 	for _, n := range nodes {
-		if n.Master != nil && n.Master.IP != nil {
-			return n.Master.IP.String()
+		if n.Master == nil {
+			continue
+		}
+		if ip := addressText(n.Master.Addrs); ip != "" {
+			return ip
 		}
 	}
 	return ""
@@ -245,11 +275,11 @@ func routeText(n types.Node) string {
 	return "route " + n.Route.String()
 }
 
-func vethCount(n int) string {
+func countText(n int, singular string) string {
 	if n == 1 {
-		return "1 veth"
+		return fmt.Sprintf("%d %s", n, singular)
 	}
-	return fmt.Sprintf("%d veths", n)
+	return fmt.Sprintf("%d %ss", n, singular)
 }
 
 func linkStatus(name string) string {
