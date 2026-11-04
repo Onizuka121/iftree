@@ -25,6 +25,7 @@ type Node struct {
 	NetNsID         int
 	NetNsName       string
 	Master          *Bridge
+	MasterName      string
 	Route           net.IP
 	Addrs           []net.IPNet
 	PeerAddrs       []net.IPNet

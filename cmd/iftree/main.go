@@ -102,8 +102,7 @@ func main() {
 		logrus.Fatal(err)
 	}
 	if len(netNsMap) == 0 {
-		logrus.Warn("no netns found")
-		os.Exit(0)
+		logrus.Debug("no netns found")
 	}
 	logrus.Debugf("net namespace id <-> name map:\n%+v\n", netNsMap)
 
